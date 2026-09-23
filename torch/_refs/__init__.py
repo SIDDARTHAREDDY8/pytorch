@@ -1312,7 +1312,16 @@ def copysign(a: TensorLikeType | NumberType, b: TensorLikeType | NumberType):
         msg = f"Expected divisor (b) to be on the same device ({a.device}) as dividend (a), but it is found on {b.device}!"
         raise RuntimeError(msg)
     # pyrefly: ignore [bad-argument-type]
-    return where(signbit(b), neg(abs(a)), abs(a))
+    result = where(signbit(b), neg(abs(a)), abs(a))
+    # Make sure the decomposition output's stride is the same as the
+    # non-decomposition path. Eager follows the first input's layout, while
+    # `where` follows its condition (derived from the second input).
+    stride = utils.compute_elementwise_output_strides(
+        *_maybe_broadcast(a, b, preserve_cpu_scalar_tensors=False)
+    )
+    if result.stride() != stride:
+        result = prims.copy_strided(result, stride)
+    return result
 
 
 # complex =  _make_elementwise_binary_reference(prims.complex, type_promotion_kind=ELEMENTWISE_TYPE_PROMOTION_KIND.DEFAULT)
@@ -1468,11 +1477,20 @@ def floor_divide(a: TensorLikeType | NumberType, b: TensorLikeType | NumberType)
         raise AssertionError("a and b must both be Tensors at this point")
     dtype = a.dtype
     if utils.is_float_dtype(dtype):
-        return _floor_divide_float(a, b)
+        result = _floor_divide_float(a, b)
     elif utils.is_integer_dtype(dtype):
-        return _floor_divide_integer(a, b)
+        result = _floor_divide_integer(a, b)
     else:
         torch._check(False, lambda: f"{dtype} not supported for floor_divide")
+    # Make sure the decomposition output's stride is the same as the
+    # non-decomposition path. Eager follows the first input's layout, while
+    # the `where` in `_floor_divide_float` follows the second input.
+    stride = utils.compute_elementwise_output_strides(
+        *_maybe_broadcast(a, b, preserve_cpu_scalar_tensors=False)
+    )
+    if result.stride() != stride:
+        result = prims.copy_strided(result, stride)
+    return result
 
 
 def _floor_divide_integer(a: Tensor, b: Tensor) -> Tensor:
@@ -2812,9 +2830,9 @@ def addr(
             lambda: f"expected bool/int alpha but got {type(alpha)}",
         )
         if not beta:
-            return torch.outer(vec1, vec2) if alpha else torch.full_like(self, False)
+            result = torch.outer(vec1, vec2) if alpha else torch.full_like(self, False)
         else:
-            return torch.logical_or(
+            result = torch.logical_or(
                 self,
                 torch.outer(vec1, vec2) if alpha else torch.full_like(self, False),
             )
@@ -2829,9 +2847,19 @@ def addr(
         )
         if beta == 0:
             # This means NaNs from self are dropped if beta is zero
-            return alpha * torch.outer(vec1, vec2)
+            result = alpha * torch.outer(vec1, vec2)
         else:
-            return beta * self + alpha * torch.outer(vec1, vec2)
+            result = beta * self + alpha * torch.outer(vec1, vec2)
+    # Make sure the decomposition output's stride is the same as the
+    # non-decomposition path. Eager computes the output strides with a
+    # TensorIterator over the expanded self, vec1 and vec2.
+    m, n = vec1.shape[0], vec2.shape[0]
+    stride = utils.compute_elementwise_output_strides(
+        self, vec1.reshape(m, 1).expand(m, n), vec2.expand(m, n)
+    )
+    if result.stride() != stride:
+        result = prims.copy_strided(result, stride)
+    return result
 
 
 # CompositeImplicitAutograd - don't register decomp

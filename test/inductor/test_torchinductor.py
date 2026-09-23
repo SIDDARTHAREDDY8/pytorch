@@ -10101,6 +10101,48 @@ def forward(self, arg0_1: "Sym(s77)", arg1_1: "Sym(s27)", arg2_1: "Sym(s53)", ar
         compiled = torch.compile(fn, backend="inductor")(inp)
         self.assertEqual(compiled.stride(), eager.stride())
 
+    def test_decomp_output_strides_follow_eager_198364(self):
+        # https://github.com/pytorch/pytorch/issues/198364
+        # The decompositions of copysign, floor_divide, div(rounding_mode="floor"),
+        # addr(beta=0) and put must preserve eager's (TensorIterator) output
+        # strides when the first input is stored transposed; otherwise
+        # op(a, b).mT.view(-1) fails to compile.
+        a = torch.rand(6, 5, device=self.device).mT  # (5, 6), strides (1, 5)
+        b = torch.rand(5, 6, device=self.device) + 1  # contiguous
+        dev = self.device
+
+        cases = {
+            "copysign": lambda a, b: torch.copysign(a, b - 1.5),
+            "floor_divide": torch.floor_divide,
+            "div floor": lambda a, b: torch.div(a, b, rounding_mode="floor"),
+            "addr beta=0": lambda a, b: torch.addr(a, b[:, 0], b[0], beta=0.0),
+            "put": lambda a, b: a.put(
+                torch.tensor([0, 7], device=dev), torch.tensor([1.0, 2.0], device=dev)
+            ),
+        }
+
+        for name, op in cases.items():
+            eager = op(a, b)
+            self.assertEqual(eager.stride(), (1, 5))
+            with torch._subclasses.FakeTensorMode() as m:
+                meta = op(m.from_tensor(a), m.from_tensor(b))
+            self.assertEqual(meta.stride(), eager.stride(), name)
+            compiled = torch.compile(op, backend="inductor")(a, b)
+            self.assertEqual(compiled, eager)
+            self.assertEqual(compiled.stride(), eager.stride(), name)
+
+        # downstream reshape from the issue must compile and match eager
+        def check_view(op):
+            def fn(a, b):
+                return op(a, b).mT.view(-1)
+
+            eager = fn(a, b)
+            compiled = torch.compile(fn, backend="inductor")(a, b)
+            self.assertEqual(compiled, eager)
+
+        for op in cases.values():
+            check_view(op)
+
     def test_index_select(self):
         def fn(a, b):
             return (

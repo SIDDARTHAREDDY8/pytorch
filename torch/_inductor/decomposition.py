@@ -1234,7 +1234,14 @@ def put(
     flattened = torch.index_put(
         flattened, [index], source.reshape(index.shape), accumulate
     )
-    return flattened.reshape(self.shape)
+    out = flattened.reshape(self.shape)
+    # Eager put preserves the input's memory layout, while the
+    # flatten/reshape above always produces a contiguous tensor.
+    # NB: expressed as an out-of-place add (instead of copy_ into a strided
+    # tensor) to keep the decomposition functional for AOTAutograd.
+    if out.stride() != self.stride():
+        out = torch.zeros_like(self) + out
+    return out
 
 
 @register_decomposition(aten.put_)
