@@ -2668,6 +2668,21 @@ class TestReductions(TestCase):
         self.assertEqual(a[:, ::2, :].median(-1)[0], torch.tensor([[0, 4], [6, 10]], device=device))
         self.assertEqual(a[:, ::2, :].nanmedian(-1)[0], torch.tensor([[0, 4], [6, 10]], device=device))
 
+    # https://github.com/pytorch/pytorch/issues/205616
+    @onlyCPU
+    def test_scalar_reduction_out_aliases_input(self, device):
+        # Reduction kernels initialize `out` with the identity element before
+        # reading the input, so an `out` that aliases the input must not
+        # clobber the value being reduced.
+        for op in (torch.amax, torch.amin, torch.mean, torch.nanmean, torch.nansum):
+            for value in (3.0, -2.0):
+                for make_out in (lambda x: x, lambda x: x.view_as(x)):
+                    x = torch.tensor(value, device=device)
+                    result = op(x, out=make_out(x))
+                    self.assertEqual(result.item(), value)
+                    # The input itself must not be overwritten by the result.
+                    self.assertEqual(x.item(), value)
+
     @skipIfTorchDynamo("https://github.com/pytorch/pytorch/pull/138657 discovers a latent bug")
     @onlyNativeDeviceTypes
     @dtypes(torch.float, torch.double)
