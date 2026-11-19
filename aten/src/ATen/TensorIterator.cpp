@@ -1087,12 +1087,37 @@ TensorIterator TensorIterator::borrowing_nullary_op(const TensorBase& out) {
     .build();
 }
 
+// Reduction kernels initialize the output with the identity element before
+// reading the input, so an output that overlaps the input would clobber
+// input values that have not been reduced yet. For example, `torch.amax(x,
+// out=x)` on a 0-dim tensor returned -inf instead of the input value
+// (https://github.com/pytorch/pytorch/issues/205616). Read from a copy of
+// the input in that case; the copy is kept alive by the iterator's owned
+// input operand.
+TensorBase maybe_copy_aliased_input(const TensorBase& out, const TensorBase& input) {
+  if (!input.defined() ||
+      get_overlap_status(out, input) == MemOverlapStatus::No) {
+    return input;
+  }
+  return Tensor(input).clone();
+}
+
+TensorBase maybe_copy_aliased_input(
+    const TensorBase& out1, const TensorBase& out2, const TensorBase& input) {
+  if (!input.defined() ||
+      (get_overlap_status(out1, input) == MemOverlapStatus::No &&
+       get_overlap_status(out2, input) == MemOverlapStatus::No)) {
+    return input;
+  }
+  return Tensor(input).clone();
+}
+
 TensorIterator TensorIterator::reduce_op(TensorBase& out, const TensorBase& a) {
   TORCH_INTERNAL_ASSERT(out.defined());
   return TensorIteratorConfig()
     .set_check_mem_overlap(false)
     .add_owned_output(out)
-    .add_owned_const_input(a)
+    .add_owned_const_input(maybe_copy_aliased_input(out, a))
     .resize_outputs(false)
     .is_reduction(true)
     // TODO: not supporting casting to outputs is only really necessary for arg{min,max}
@@ -1116,7 +1141,7 @@ TensorIterator TensorIterator::reduce_op(TensorBase& out1, TensorBase& out2, con
     .set_check_mem_overlap(false)
     .add_owned_output(out1)
     .add_owned_output(out2)
-    .add_owned_const_input(a)
+    .add_owned_const_input(maybe_copy_aliased_input(out1, out2, a))
     .resize_outputs(false)
     .is_reduction(true)
     .check_all_same_dtype(false)
